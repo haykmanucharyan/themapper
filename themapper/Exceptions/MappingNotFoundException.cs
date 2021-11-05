@@ -4,7 +4,7 @@ namespace themapper.Exceptions
 {
     public class MappingNotFoundException : Exception
     {
-        public MappingNotFoundException(Type type) : base($"hmapper mapping for [{type}] not found")
+        public MappingNotFoundException(Type type) : base($"themapper: mapping for [{type}] not found")
         {
             
         }

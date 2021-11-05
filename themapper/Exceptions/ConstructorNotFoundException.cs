@@ -4,7 +4,7 @@ namespace themapper.Exceptions
 {
     public class ConstructorNotFoundException : Exception
     {
-        public ConstructorNotFoundException(Type type) : base($"Default constructor for [{type}] not found")
+        public ConstructorNotFoundException(Type type) : base($"themapper: default constructor for [{type}] not found")
         { 
         
         }
