@@ -6,23 +6,24 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Data;
 using System.Reflection;
+using System.Collections.Concurrent;
 
 namespace themapper
 {
-    public class DBMapper
+    public class DBMapper : IDBMapper
     {
         #region Fields
 
         static readonly object _syncRoot = new object();
-        static DBMapper _instance = null;
+        static IDBMapper _instance = null;
 
-        Dictionary<Type, DBTypeInfo> _map;
+        ConcurrentDictionary<Type, DBTypeInfo> _map;
 
         #endregion
 
         #region Properties
 
-        public static DBMapper Instance
+        public static IDBMapper Instance
         {
             get
             {
@@ -35,6 +36,9 @@ namespace themapper
             }
         }
 
+        /// <summary>
+        /// Gets quantity of mapping types.
+        /// </summary>
         public int TypesCount => _map.Count;
 
         #endregion
@@ -43,43 +47,20 @@ namespace themapper
 
         protected DBMapper()
         {
-            _map = new Dictionary<Type, DBTypeInfo>();
-
-            Initialize();
+            _map = new ConcurrentDictionary<Type, DBTypeInfo>();
         }
 
         #endregion
 
-        #region Private methods
-
-        private List<Assembly> GetAssembliesRecursively(Assembly asm)
-        {
-            List<Assembly> assemblies = new List<Assembly>();
-
-            foreach (AssemblyName an in asm.GetReferencedAssemblies())
-            {
-                Assembly a = AppDomain.CurrentDomain.Load(an);
-                assemblies.Add(a);
-
-                assemblies.AddRange(GetAssembliesRecursively(a));
-            }
-
-            return assemblies;
-        }
-
-        private void TraverseAssembly(Assembly asm)
-        {
-            foreach (Type type in asm.GetTypes())
-            {
-                DBEntity attr = type.GetCustomAttribute<DBEntity>();
-
-                if (attr != null)
-                    _map.TryAdd(type, TraverseType(type));
-            }
-        }
+        #region Private methods        
 
         private DBTypeInfo TraverseType(Type type)
         {
+            DBEntity objectAttribute = type.GetCustomAttribute<DBEntity>();
+
+            if (objectAttribute == null)
+                throw new MissingDBEntityAttribute(type);
+
             ConstructorInfo ci = type.GetConstructor(Type.EmptyTypes);
 
             if (ci == null)
@@ -91,33 +72,153 @@ namespace themapper
 
             foreach (PropertyInfo pi in props)
             {
-                DBField attr = pi.GetCustomAttribute<DBField>();
+                DBField propertyAttribute = pi.GetCustomAttribute<DBField>();
 
-                if (attr != null)
-                    typeInfo.AddFieldInfo(pi, attr);
+                if (propertyAttribute != null)
+                    typeInfo.AddFieldInfo(pi, propertyAttribute);
             }
 
             return typeInfo;
         }
 
-        private T CreateEntity<T>(IDataReader reader) where T : class
+        private DBTypeInfo GetDBTypeInfo<T>() where T : class
         {
-            DBTypeInfo typeInfo = _map[typeof(T)];
+            Type type = typeof(T);
 
-            T entity = typeInfo.CreateInstance<T>();
-            typeInfo.SetProperties<T>(entity, reader);
+            return _map.GetOrAdd(type, _ =>
+            {
+                return TraverseType(type);
+            });
+        }
+
+        private T CreateEntity<T>(DBTypeInfo dBTypeInfo, IDataReader reader) where T : class
+        {
+            T entity = dBTypeInfo.CreateInstance<T>();
+            dBTypeInfo.SetProperties<T>(entity, reader);
 
             return entity;
         }
 
-        private DataTable ToTableInternal<T>(IEnumerable<T> entities) where T : class
+        private List<T> Map2ListInternal<T>(IDataReader reader, int knownSize) where T : class
         {
-            Type type = typeof(T);
+            DBTypeInfo dbTypeInfo = GetDBTypeInfo<T>();
 
-            if (!_map.ContainsKey(type))
-                throw new MappingNotFoundException(type);
+            List<T> res = new List<T>(knownSize > 0 ? 4 : knownSize);
 
-            DBTypeInfo typeInfo = _map[type];
+            while (reader.Read())
+                res.Add(CreateEntity<T>(dbTypeInfo, reader));
+
+            return res;
+        }
+
+        #endregion
+
+        #region Public methods
+
+        /// <summary>
+        /// Maps single entity to IDataReader's current record.
+        /// So make sure that IDataReader Read() method is called for at least once.
+        /// </summary>
+        /// <typeparam name="T">Type to be mapped to.</typeparam>
+        /// <param name="reader">IDataReader object.</param>
+        /// <returns>Mapped entity.</returns>
+        public T Map<T>(IDataReader reader) where T : class
+        {
+            DBTypeInfo dbTypeInfo = GetDBTypeInfo<T>();
+
+            return CreateEntity<T>(dbTypeInfo, reader);
+        }
+
+        /// <summary>
+        /// Reads and maps all records of IDataReader object to List<T>.
+        /// Resizing of List<T> will occur.
+        /// The logic is while(reader.Read()) DoMapping();
+        /// </summary>
+        /// <typeparam name="T">Type to be mapped to.</typeparam>
+        /// <param name="reader">IDataReader object.</param>
+        /// <returns>List of mapped entities.</returns>
+        public List<T> Map2List<T>(IDataReader reader) where T : class
+        {
+            return Map2ListInternal<T>(reader, 0);
+        }
+
+        /// <summary>
+        /// Reads and maps all records of IDataReader object to List<T> by passing knownSize argument to List<T>'s Ctor (avoiding List<T> resize).
+        /// The logic is while(reader.Read()) DoMapping();
+        /// </summary>
+        /// <typeparam name="T">Type to be mapped to.</typeparam>
+        /// <param name="reader">IDataReader object.</param>
+        /// <param name="knownSize">The size of result list to avoid List<T> resizing.</param>
+        /// <returns>List of mapped entities.</returns>
+        public List<T> Map2List<T>(IDataReader reader, int knownSize) where T : class
+        {
+            return Map2ListInternal<T>(reader, knownSize);
+        }
+
+        /// <summary>
+        /// Reads and maps all records of IDataReader object to T[] (array).
+        /// Because the size of array is not known, List<T> is used (resizing will occur). 
+        /// The result is List<T>'s ToArray() method call.
+        /// </summary>
+        /// <typeparam name="T">Type to be mapped to.</typeparam>
+        /// <param name="reader">IDataReader object.</param>
+        /// <returns>Array of mapped entities.</returns>
+        public T[] Map2Array<T>(IDataReader reader) where T : class
+        {
+            return Map2List<T>(reader).ToArray();
+        }
+
+        /// <summary>
+        /// Reads and maps all records of IDataReader object to T[] (array).
+        /// Because there is known size, the result array will be of that size.
+        /// The loop will iterate, untill can read from IDataReader object or the array size is reached.
+        /// The logic is while(reader.Read() && index < array.Length) DoMapping();
+        /// </summary>
+        /// <typeparam name="T">Type to be mapped to.</typeparam>
+        /// <param name="reader">IDataReader object.</param>
+        /// <param name="knownSize">The size of array.</param>
+        /// <returns>Array of mapped entities.</returns>
+        public T[] Map2Array<T>(IDataReader reader, int knownSize) where T : class
+        {
+            DBTypeInfo dbTypeInfo = GetDBTypeInfo<T>();
+            T[] array = new T[knownSize];
+
+            int index = 0;
+            while (reader.Read() && index < array.Length)
+                array[index++] = CreateEntity<T>(dbTypeInfo, reader);
+
+            return array;
+        }
+
+        /// <summary>
+        /// Reads and maps all records of IDataReader object to ObservableCollection<T>.
+        /// Resizing of ObservableCollection<T> will occur.
+        /// </summary>
+        /// <typeparam name="T">Type to be mapped to.</typeparam>
+        /// <param name="reader">IDataReader object.</param>
+        /// <returns>ObservableCollection of mapped entities.</returns>
+        public ObservableCollection<T> Map2Observable<T>(IDataReader reader) where T : class
+        {
+            DBTypeInfo dbTypeInfo = GetDBTypeInfo<T>();
+
+            ObservableCollection<T> res = new ObservableCollection<T>();
+
+            while (reader.Read())
+                res.Add(CreateEntity<T>(dbTypeInfo, reader));
+
+            return res;
+        }
+
+        /// <summary>
+        /// Will map entities to DataTable object.
+        /// AcceptChanges() method is called after mapping.
+        /// </summary>
+        /// <typeparam name="T">Type to be mapped from.</typeparam>
+        /// <param name="entities">Enumerable entities.</param>
+        /// <returns>DataTable filled with mapped entities.</returns>
+        public DataTable ToTable<T>(IEnumerable<T> entities) where T : class
+        {
+            DBTypeInfo typeInfo = GetDBTypeInfo<T>();
             DataTable tbl = typeInfo.GetTable();
 
             foreach (T e in entities)
@@ -126,87 +227,6 @@ namespace themapper
             tbl.AcceptChanges();
 
             return tbl;
-        }
-
-        private void Initialize()
-        {
-            HashSet<Assembly> assemblies = new HashSet<Assembly>(GetAssembliesRecursively(Assembly.GetEntryAssembly()));
-
-            foreach (Assembly asm in assemblies)
-                TraverseAssembly(asm);
-        }
-
-        #endregion
-
-        #region Public methods
-
-        public T Map<T>(IDataReader reader) where T : class
-        {
-            Type type = typeof(T);
-
-            if (!_map.ContainsKey(type))
-                throw new MappingNotFoundException(type);
-
-            return CreateEntity<T>(reader);
-        }
-
-        public List<T> Map2List<T>(IDataReader reader) where T : class
-        {
-            Type type = typeof(T);
-
-            if (!_map.ContainsKey(type))
-                throw new MappingNotFoundException(type);
-
-            List<T> res = new List<T>();
-
-            while (reader.Read())
-                res.Add(CreateEntity<T>(reader));
-
-            return res;
-        }
-
-        public T[] Map2Array<T>(IDataReader reader) where T : class
-        {
-            return Map2List<T>(reader).ToArray();
-        }
-
-        public ObservableCollection<T> Map2Observable<T>(IDataReader reader) where T : class
-        {
-            Type type = typeof(T);
-
-            if (!_map.ContainsKey(type))
-                throw new MappingNotFoundException(type);
-
-            ObservableCollection<T> res = new ObservableCollection<T>();
-
-            while (reader.Read())
-                res.Add(CreateEntity<T>(reader));
-
-            return res;
-        }
-
-        public DataTable ToTable<T>(List<T> entities) where T : class
-        {
-            return ToTableInternal<T>(entities);
-        }
-
-        public DataTable ToTable<T>(T[] entities) where T : class
-        {
-            return ToTableInternal<T>(entities);
-        }
-
-        public DataTable ToTable<T>(ObservableCollection<T> entities) where T : class
-        {
-            return ToTableInternal<T>(entities);
-        }
-
-        public void ReInitialize()
-        {
-            lock (_syncRoot)
-            {
-                _map.Clear();
-                Initialize();
-            }
         }
 
         #endregion
