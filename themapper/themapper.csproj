@@ -1,8 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>netcoreapp3.1;net5.0;net6.0;net7.0</TargetFrameworks>
-    <Version>2.1.0</Version>
+    <TargetFrameworks>netcoreapp3.1;net5.0;net6.0;net7.0;net8</TargetFrameworks>
+    <Version>2.2.0</Version>
     <Authors>Hayk Manucharyan</Authors>
     <Company>Hayk Manucharyan</Company>
     <Description>Minimalistic ADO.NET entity mapper.</Description>
